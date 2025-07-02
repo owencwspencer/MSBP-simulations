@@ -6,10 +6,10 @@ import multiprocessing
 import random
 
 n = 1000
-initial_activated_count = 5
-p_values = np.arange(0.005, 0.2, 0.005)
-k1_values = [1, 2, 3, 4]
-sigma_values = np.arange(0.1, 0.9, 0.1)
+initial_activated_count = 10
+p_values = np.arange(0.005, 0.3, 0.005)
+k1_values = [2, 3, 4]
+sigma_values = np.arange(0.4, 0.9, 0.1)
 
 def increase_degree(G, delta, rng):
     stubs = [node for node in G.nodes() for _ in range(delta)]
@@ -35,8 +35,8 @@ def spread_activation(_G, node_states, k1, k2, sigma):
             elif total >= k1:
                 nodes_k1.add(node)
     inactive_to_strong = sum(1 for node in nodes_k2 if node_states[node] == 0)
-    weak_to_strong = sum(1 for node in nodes_k2 if node_states[node] == sigma)
-    inactive_to_weak = sum(1 for node in nodes_k1 if node_states[node] == 0)
+    weak_to_strong     = sum(1 for node in nodes_k2 if node_states[node] == sigma)
+    inactive_to_weak   = sum(1 for node in nodes_k1 if node_states[node] == 0)
     for node in nodes_k2:
         node_states[node] = 1
     for node in nodes_k1:
@@ -50,11 +50,8 @@ def worker_init(adj_dict, initial_nodes):
     NODES = list(adj_dict.keys())
     initial_global = initial_nodes
 
-def run_simulation(k1, k2, sigma, strong_initial):
-    if strong_initial:
-        node_states = {node: 1 if node in initial_global else 0 for node in NODES}
-    else:
-        node_states = {node: sigma if node in initial_global else 0 for node in NODES}
+def run_simulation(k1, k2, sigma):
+    node_states = {node: (sigma if node in initial_global else 0) for node in NODES}
     i_w_list = []
     i_s_list = []
     w_s_list = []
@@ -76,11 +73,13 @@ def run_simulation(k1, k2, sigma, strong_initial):
     return n_steps, i_w_list, i_s_list, w_s_list, n_inactive_list, n_weak_list, n_strong_list
 
 def worker_task(params):
-    exp, p, k1, k2, sigma, strong_initial = params
-    n_steps, i_w, i_s, w_s, ni, nw, ns = run_simulation(k1, k2, sigma, strong_initial)
-    return [k1, k2, sigma, p, exp, strong_initial, n_steps,
-            json.dumps(i_w), json.dumps(i_s), json.dumps(w_s),
-            json.dumps(ni), json.dumps(nw), json.dumps(ns)]
+    exp, p, k1, k2, sigma = params
+    n_steps, i_w, i_s, w_s, ni, nw, ns = run_simulation(k1, k2, sigma)
+    return [
+        k1, k2, sigma, p, exp, n_steps,
+        json.dumps(i_w), json.dumps(i_s), json.dumps(w_s),
+        json.dumps(ni), json.dumps(nw), json.dumps(ns)
+    ]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -89,7 +88,7 @@ if __name__ == '__main__':
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
-            'k1','k2','sigma','p','experiment','strong_initial','n_steps',
+            'k1','k2','sigma','p','experiment','n_steps',
             'i_w','i_s','w_s','n_inactive','n_weak','n_strong'
         ])
         for exp in range(1, num_experiments+1):
@@ -118,14 +117,13 @@ if __name__ == '__main__':
                         initializer=worker_init,
                         initargs=(adjacency, initial)
                     ) as pool:
-                        for strong_initial in (False, True):
-                            tasks = [
-                                (exp, p, k1, k2, sigma, strong_initial)
-                                for k1 in k1_values
-                                for k2 in (k1+1, k1+2, k1+3)
-                                for sigma in sigma_values
-                            ]
-                            results = pool.map(worker_task, tasks)
-                            writer.writerows(results)
-                            f.flush()
+                        tasks = [
+                            (exp, p, k1, k2, sigma)
+                            for k1 in k1_values
+                            for k2 in (k1+1, k1+2, k1+3)
+                            for sigma in sigma_values
+                        ]
+                        results = pool.map(worker_task, tasks)
+                        writer.writerows(results)
+                        f.flush()
     print(f"Processing complete. Results saved to {csv_filename}")
