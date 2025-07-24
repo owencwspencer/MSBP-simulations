@@ -1,0 +1,214 @@
+---
+title: "inputs"
+output: html_document
+date: "2025-07-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(viridis)
+```
+
+```{r}
+colormap <- "viridis"
+
+limits = c(0, 1)
+
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_discrete  <- scale_colour_discrete
+scale_fill_discrete   <- function(...) {
+  scale_fill_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_continuous  <- scale_colour_continuous
+scale_fill_continuous   <- function(...) {
+  scale_fill_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+```
+
+```{r}
+df <- readRDS("inputs_results.rds")
+```
+
+```{r}
+simulation_data <- df
+
+timeseries_data <- simulation_data %>%
+  mutate(across(
+    .cols = c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong),
+    .fns = ~map(.x, function(cell) {
+      if (length(cell) == 0) {
+        return(integer(0))
+      } else {
+        return(unlist(cell))
+      }
+    })
+  )) %>%
+  mutate(run_id = row_number()) %>%
+  select(
+    run_id, p, k1, k2, sigma,
+    weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong
+  ) %>%
+  unnest(c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong)) %>%
+  group_by(run_id) %>%
+  mutate(time_step = row_number()) %>%
+  ungroup()
+```
+
+```{r}
+ratio_data <- timeseries_data %>%
+  mutate(equation = k2 - k1 / sigma) %>%
+  pivot_longer(
+    cols = c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong),
+    names_to = "measure",
+    values_to = "value"
+  ) %>%
+  extract(
+    measure,
+    into = c("transition_to", "neighbor_type"),
+    regex = "^(.*)_by_(.*)$",
+    remove = FALSE
+  ) %>%
+  pivot_wider(
+    names_from = neighbor_type,
+    values_from = value,
+    values_fill = 0
+  ) %>%
+  mutate(
+    ratio = if_else(strong + weak == 0, 0, strong / (strong + weak))
+  ) %>%
+  mutate(
+    transition_to = factor(
+      transition_to,
+      levels = c("weak", "strong"),
+      labels = c("Nodes Becoming Weak", "Nodes Becoming Strong")
+    ),
+    equation_label = paste("Eq =", round(equation, 2))
+  )
+```
+
+```{r}
+plot_lines <- ratio_data %>%
+  group_by(equation_label, transition_to, time_step) %>%
+  summarise(mean_ratio = mean(ratio, na.rm = TRUE), .groups = 'drop')
+```
+
+```{r, fig.height = 20, fig.width = 10}
+temporal_plot <- ggplot(
+  plot_lines,
+  aes(x = time_step, y = mean_ratio)
+) +
+  geom_line(size = 1, alpha = 0.6) +
+  facet_grid(equation_label ~ transition_to, scales = "free_y") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_bw()
+
+print(temporal_plot)
+```
+
+```{r}
+static_ratio_data <- simulation_data %>%
+  mutate(
+    total_weak_by_weak = map_dbl(weak_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_weak_by_strong = map_dbl(weak_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_strong_by_weak = map_dbl(strong_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_strong_by_strong = map_dbl(strong_by_strong, ~ sum(unlist(.x), na.rm = TRUE))
+  ) %>%
+  mutate(
+    equation = k2 - k1 / sigma,
+    ratio_weak = total_weak_by_strong / (total_weak_by_strong + total_weak_by_weak),
+    ratio_strong = total_strong_by_strong / (total_strong_by_strong + total_strong_by_weak)
+  ) %>%
+  select(p, equation, ratio_weak, ratio_strong) %>%
+  pivot_longer(
+    cols = c(ratio_weak, ratio_strong),
+    names_to = "transition_to",
+    values_to = "ratio"
+  ) %>%
+  mutate(
+    transition_to = factor(
+      transition_to,
+      levels = c("ratio_weak", "ratio_strong"),
+      labels = c("Nodes Becoming Weak", "Nodes Becoming Strong")
+    )
+  ) %>%
+  filter(!is.nan(ratio) & is.finite(ratio))
+```
+
+```{r}
+static_summary_lines <- static_ratio_data %>%
+  group_by(p, transition_to, equation) %>%
+  summarise(median_ratio = median(ratio, na.rm = TRUE), .groups = 'drop')
+```
+
+```{r, fig.height=40, fig.width=10}
+static_plot <- ggplot(
+  static_ratio_data,
+  aes(x = equation, y = ratio)
+) +
+  geom_point(alpha = 0.02, shape = 16, color = "gray50") +
+  geom_line(data = static_summary_lines, aes(y = median_ratio), size = 1, color = "#D55E00") +
+  facet_grid(p ~ transition_to, labeller = "label_both") +
+  theme_bw()
+
+print(static_plot)
+```
+
+```{r}
+individual_final_ratios <- simulation_data %>%
+  mutate(
+    total_weak_by_strong = map_dbl(weak_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_strong_by_strong = map_dbl(strong_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_weak_by_weak = map_dbl(weak_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
+    total_strong_by_weak = map_dbl(strong_by_weak, ~ sum(unlist(.x), na.rm = TRUE))
+  ) %>%
+  mutate(
+    ratio_weak = if_else(
+      total_weak_by_strong + total_weak_by_weak == 0, 0,
+      total_weak_by_strong / (total_weak_by_strong + total_weak_by_weak)
+    ),
+    ratio_strong = if_else(
+      total_strong_by_strong + total_strong_by_weak == 0, 0,
+      total_strong_by_strong / (total_strong_by_strong + total_strong_by_weak)
+    ),
+    equation = k2 - sigma
+  ) %>%
+  select(p, equation, k2, ratio_weak, ratio_strong) %>%
+  filter(
+    !is.nan(ratio_weak) & is.finite(ratio_weak) &
+    !is.nan(ratio_strong) & is.finite(ratio_strong)
+  )
+```
+
+```{r}
+p_value_to_plot <- 0.36
+
+plot_weak_individual_filtered <- individual_final_ratios %>%
+  filter(p == p_value_to_plot) %>%
+  ggplot(aes(x = equation, y = k2, color = ratio_weak)) +
+  geom_jitter(alpha = 0.1, width = 0.1, height = 0.1) +
+  theme_bw()
+
+print(plot_weak_individual_filtered)
+```
+
+```{r}
+p_value_to_plot <- 0.1
+
+plot_strong_individual_filtered <- individual_final_ratios %>%
+  filter(p == p_value_to_plot) %>%
+  ggplot(aes(x = equation, y = k2, color = ratio_strong)) +
+  geom_jitter(alpha = 0.1, width = 0.1, height = 0.1) +
+  theme_bw()
+
+print(plot_strong_individual_filtered)
+```

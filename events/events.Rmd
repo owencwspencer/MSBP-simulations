@@ -1,0 +1,214 @@
+---
+title: "full"
+output: html_document
+date: "2025-06-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height=4, fig.width=6)
+```
+
+```{r import_libraries}
+library(tidyverse)
+library(viridis)
+```
+
+```{r set_colormap}
+colormap <- "mako"
+
+limits = c(0, 0.9)
+
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_discrete  <- scale_colour_discrete
+scale_fill_discrete   <- function(...) {
+  scale_fill_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_continuous  <- scale_colour_continuous
+scale_fill_continuous   <- function(...) {
+  scale_fill_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+```
+
+```{r read_data}
+df <- read.csv("events_results.csv",
+               stringsAsFactors = FALSE) %>% filter(k1 > 2) %>%
+  mutate(
+    full_strong  = full_strong  == "True",
+    early_strong = early_strong == "True",
+    prop_strong_via_strong = as.numeric(prop_strong_via_strong)
+  )
+```
+
+```{r processing_functions}
+aggregate_event <- function(df, event, event_value, filter_expr = TRUE) {
+  df %>%
+    filter({{filter_expr}}) %>%
+    group_by(n, p_value, k1, k2) %>%
+    summarise(p_event = mean({{event}} == event_value), .groups = "drop")
+}
+
+aggregate_trial <- function(df, event, event_value, group_var, filter_expr = TRUE) {
+  df %>%
+    filter({{filter_expr}}) %>%
+    group_by({{group_var}}, n, test_num, p_value) %>%
+    summarise(p_event = mean({{event}} == event_value), .groups = "drop")
+}
+
+compute_pcrit <- function(trial_df, group_var) {
+  trial_df %>%
+    group_by({{group_var}}, n, test_num) %>%
+    summarise(
+      p_crit = {
+        x  <- p_event
+        y  <- p_value
+        ok <- !is.na(x)
+        if (sum(ok) < 2 || length(unique(x[ok])) < 2) {
+          NA_real_
+        } else {
+          approx(
+            x     = x[ok],
+            y     = y[ok],
+            xout  = 0.5,
+            ties  = function(x) x[1]
+          )$y
+        }
+      },
+      .groups = "drop"
+    )
+}
+```
+
+```{r visualization_functions}
+plot_event <- function(agg_df,
+                       k1_vals   = NULL,
+                       k2_vals   = NULL,
+                       x_limits  = NULL) {
+  df <- agg_df
+  if (!is.null(k1_vals)) df <- df %>% filter(k1 %in% k1_vals)
+  if (!is.null(k2_vals)) df <- df %>% filter(k2 %in% k2_vals)
+  p <- ggplot(df,
+              aes(x = p_value, y = p_event,
+                  color = factor(n), group = factor(n))) +
+       geom_point(size = 2) +
+       geom_line(size = 1) +
+       theme_bw()
+  if (!is.null(x_limits))
+    p <- p + scale_x_continuous(limits = x_limits)
+  p
+}
+
+plot_pcrit <- function(pcrit_df, group_var) {
+  var <- deparse(substitute(group_var))
+
+  ann <- pcrit_df %>%
+    group_by({{group_var}}) %>%
+    summarise(
+      intercept = coef(lm(log10(p_crit) ~ log10(n), data = cur_data()))[1],
+      slope     = coef(lm(log10(p_crit) ~ log10(n), data = cur_data()))[2],
+      .groups   = "drop"
+    )
+
+  ggplot(pcrit_df,
+         aes(x = n, y = p_crit,
+             color = factor({{group_var}}),
+             group = factor({{group_var}}))) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "lm", se = FALSE) +
+    stat_summary(fun = median, geom = "line", aes(group = factor({{group_var}})), alpha = 0.3) +
+    stat_summary(fun = median, geom = "point", aes(group = factor({{group_var}})), size = 3) +
+    scale_x_log10() +
+    scale_y_log10() + theme_bw()
+}
+```
+
+```{r full_strong_processing}
+df_fs_event <- df %>% filter(k1 == 5, k2 == 6)
+df_fs_pcrit <- df %>% filter(k1 %in% c(3, 4, 5))
+```
+
+```{r}
+agg_fs <- aggregate_event(df_fs_event, full_strong, TRUE)
+trial_fs <- aggregate_trial(df_fs_pcrit, full_strong, TRUE, k1)
+pcrit_fs <- compute_pcrit(trial_fs, k1)
+```
+
+```{r full_strong_visualization}
+fs_event <- plot_event(agg_fs,
+                       k1_vals  = NULL,
+                       k2_vals  = NULL,
+                       x_limits = NULL) + scale_x_continuous(limits = c(0.05, 0.35))
+
+fs_pcrit <- plot_pcrit(pcrit_fs, k1)
+```
+
+```{r}
+print(fs_event)
+print(fs_pcrit)
+```
+
+```{r early_strong_processing}
+df_es_event <- df %>% filter(k1 == 5, k2 == 9)
+df_es_pcrit <- df %>% filter(k2 %in% c(7, 8, 9))
+```
+
+```{r}
+agg_es <- aggregate_event(df_es_event, early_strong, TRUE, filter_expr = (full_strong == TRUE))
+trial_es <- aggregate_trial(df_es_pcrit, early_strong, TRUE, k2, filter_expr = (full_strong == TRUE))
+pcrit_es <- compute_pcrit(trial_es, k2)
+```
+
+```{r early_strong_visualization}
+es_event <- plot_event(agg_es,
+                       k1_vals  = NULL,
+                       k2_vals  = NULL,
+                       x_limits = NULL) + scale_x_continuous(limits = c(0.15, 0.75))
+
+es_pcrit <- plot_pcrit(pcrit_es, k2)
+```
+
+```{r}
+print(es_event)
+print(es_pcrit)
+```
+
+```{r strong_via_strong_processing}
+df_svs_event <- df %>% filter(k1 == 3, k2 == 5)
+df_svs_pcrit <- df %>% filter(k2 %in% c(4, 5, 6))
+```
+
+```{r}
+agg_svs <- aggregate_event(df_svs_event, prop_strong_via_strong, 1, filter_expr = (full_strong == TRUE & early_strong == TRUE))
+trial_svs <- aggregate_trial(df_svs_pcrit, prop_strong_via_strong, 1, k2, filter_expr = (full_strong == TRUE & early_strong == TRUE))
+pcrit_svs <- compute_pcrit(trial_svs, k2)
+```
+
+```{r strong_via_strong_visualization}
+svs_event <- plot_event(agg_svs,
+                        k1_vals  = NULL,
+                        k2_vals  = NULL,
+                        x_limits = NULL) + scale_x_continuous(limits = c(0.15, 0.5))
+
+svs_pcrit <- plot_pcrit(pcrit_svs, k2)
+```
+
+```{r}
+print(svs_event)
+print(svs_pcrit)
+```
+
+```{r}
+ggsave(
+  "svs_pcrit.pdf",
+  plot      = svs_pcrit,
+  width     = 6,
+  height    = 4,
+  units     = "in",
+  dpi       = 320
+)
+```

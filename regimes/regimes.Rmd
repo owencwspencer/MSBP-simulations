@@ -1,0 +1,297 @@
+---
+title: "Figure3"
+output: html_document
+date: "2025-06-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(jsonlite)
+library(viridis)
+```
+
+```{r}
+colormap <- "mako"
+
+limits = c(0, 0.9)
+
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_discrete  <- scale_colour_discrete
+scale_fill_discrete   <- function(...) {
+  scale_fill_viridis_d(option = colormap, begin = limits[1], end = limits[2])
+}
+
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+scale_color_continuous  <- scale_colour_continuous
+scale_fill_continuous   <- function(...) {
+  scale_fill_viridis_c(option = colormap, begin = limits[1], end = limits[2])
+}
+```
+
+```{r}
+df <- readRDS("regimes_results_10_parsed.rds")
+```
+
+```{r}
+plot_single_trajectory <- function(data,
+                                   k1_val,
+                                   k2_val,
+                                   sigma_val,
+                                   p_val,
+                                   threshold    = 0.5,
+                                   metric       = c("p", "t"),
+                                   log_scale    = FALSE,
+                                   log_base     = 10,
+                                   log_sigma    = 1) {
+  metric <- match.arg(metric)
+  n_total <- 1000
+
+  df_sub <- data %>%
+    filter(
+      k1     == k1_val,
+      k2     == k2_val,
+      near(sigma, sigma_val),
+      near(p,      p_val)
+    ) %>%
+    mutate(run_id = row_number())
+  message("After df_sub: runs = ", n_distinct(df_sub$run_id))
+
+  init_state_df <- df_sub %>%
+    distinct(run_id) %>%
+    mutate(
+      step       = 0L,
+      n_inactive = n_total - 10L,
+      n_strong   = 0L,
+      n_weak     = 10L
+    ) %>%
+    pivot_longer(
+      cols      = c(n_inactive, n_weak, n_strong),
+      names_to  = "state",
+      values_to = "count"
+    ) %>%
+    mutate(
+      proportion = count / n_total,
+      rel_step   = 0L
+    )
+
+  sim_state_df <- df_sub %>%
+    pivot_longer(
+      cols      = c(n_inactive, n_weak, n_strong),
+      names_to  = "state",
+      values_to = "count_list"
+    ) %>%
+    unnest_longer(count_list, indices_to = "step") %>%
+    rename(count = count_list) %>%
+    mutate(proportion = count / n_total)
+
+  df_state_long <- bind_rows(init_state_df, sim_state_df)
+
+  thresh <- df_state_long %>%
+    filter(state == "n_inactive", proportion < threshold) %>%
+    group_by(run_id) %>%
+    summarize(step0 = min(step), .groups = "drop")
+  message("After thresh: runs crossing = ", nrow(thresh))
+
+  df_state_sync <- df_state_long %>%
+    inner_join(thresh, by = "run_id") %>%
+    mutate(rel_step = step - step0) %>%
+    mutate(state = factor(
+      state,
+      levels = c("n_inactive","n_weak","n_strong"),
+      labels = c("Inactive","Weak","Strong")
+    ))
+
+  sx <- if (log_scale) {
+    scale_x_continuous(
+      trans  = scales::pseudo_log_trans(base = log_base, sigma = log_sigma),
+      breaks = scales::breaks_pretty(n = 7)
+    )
+  } else {
+    scale_x_continuous(breaks = scales::breaks_pretty(n = 7))
+  }
+
+  if (metric == "p") {
+    range_rel <- range(df_state_sync$rel_step)
+
+    df_state_plot <- df_state_sync %>%
+      group_by(run_id, state) %>%
+      complete(rel_step = seq(range_rel[1], range_rel[2], 1)) %>%
+      arrange(run_id, state, rel_step) %>%
+      fill(proportion, .direction = "down") %>%
+      fill(proportion, .direction = "up") %>%
+      ungroup()
+    message("After padding: runs = ", n_distinct(df_state_plot$run_id),
+            ", steps = [", min(df_state_plot$rel_step), ",", max(df_state_plot$rel_step), "]")
+
+    new_first <- min(df_state_plot$rel_step) - 1L
+
+    init_extra <- df_state_plot %>%
+      distinct(run_id, state) %>%
+      mutate(
+        rel_step   = new_first,
+        proportion = case_when(
+          state == "Inactive" ~ 990/1000,
+          state == "Weak"     ~ 10/1000,
+          state == "Strong"   ~ 0
+        )
+      )
+
+    df_state_plot <- bind_rows(init_extra, df_state_plot)
+
+    median_df <- df_state_plot %>%
+      group_by(state, rel_step) %>%
+      summarize(
+        median_prop = median(proportion),
+        sd_prop     = sd(proportion),
+        .groups      = "drop"
+      ) %>%
+      mutate(
+        lower = pmax(median_prop - sd_prop, 0),
+        upper = pmin(median_prop + sd_prop, 1)
+      )
+
+    p <- ggplot() +
+      geom_ribbon(
+        data = median_df,
+        aes(rel_step, ymin = lower, ymax = upper, fill = state),
+        alpha = 0.2, colour = NA
+      ) +
+      geom_line(
+        data = median_df,
+        aes(rel_step, median_prop, color = state, group = state),
+        size = 1
+      ) +
+      labs(
+        title = paste0("k1=",k1_val,", k2=",k2_val,", σ=",sigma_val,", p=",p_val),
+        x     = paste0("Percolation steps until the proportion of inactive nodes drops below ",threshold),
+        y     = "Proportion of nodes",
+        fill  = "State",
+        color = "State"
+      ) +
+      theme_bw() +
+      sx
+
+    return(p)
+
+  } else {
+    sim_trans_df <- df_sub %>%
+      pivot_longer(
+        cols      = c(i_w, i_s, w_s),
+        names_to  = "transition",
+        values_to = "count_list"
+      ) %>%
+      unnest_longer(count_list, indices_to = "step")
+
+    df_trans_sync <- sim_trans_df %>%
+      inner_join(thresh, by = "run_id") %>%
+      mutate(
+        rel_step   = step - step0,
+        transition = factor(
+          transition,
+          levels = c("i_w","i_s","w_s"),
+          labels = c("Inactive → Weak","Inactive → Strong","Weak → Strong")
+        )
+      )
+    message("After sync (trans): runs =", n_distinct(df_trans_sync$run_id),
+            ", steps = [", min(df_trans_sync$rel_step), ",", max(df_trans_sync$rel_step), "]")
+
+    range_rel <- range(df_trans_sync$rel_step)
+
+    df_trans_plot <- df_trans_sync %>%
+      group_by(run_id, transition) %>%
+      complete(rel_step = seq(range_rel[1], range_rel[2], 1)) %>%
+      arrange(run_id, transition, rel_step) %>%
+      fill(count_list, .direction = "down") %>%
+      fill(count_list, .direction = "up") %>%
+      ungroup()
+    message("After padding (trans): runs =", n_distinct(df_trans_plot$run_id),
+            ", steps = [", min(df_trans_plot$rel_step), ",", max(df_trans_plot$rel_step), "]")
+
+    new_first_t  <- min(df_trans_plot$rel_step) - 1L
+    new_second_t <- new_first_t - 1L
+
+    init_extra_t1 <- df_trans_plot %>%
+      distinct(run_id, transition) %>%
+      mutate(rel_step = new_second_t, count_list = 0L)
+    init_extra_t2 <- df_trans_plot %>%
+      distinct(run_id, transition) %>%
+      mutate(rel_step = new_first_t,  count_list = 0L)
+
+    df_trans_plot <- bind_rows(init_extra_t1, init_extra_t2, df_trans_plot)
+
+    median_trans <- df_trans_plot %>%
+      group_by(transition, rel_step) %>%
+      summarize(
+        median_count = median(count_list),
+        sd_count     = sd(count_list),
+        .groups      = "drop"
+      ) %>%
+      mutate(
+        lower = pmax(median_count - sd_count, 0),
+        upper = pmin(median_count + sd_count, n_total)
+      )
+
+    p <- ggplot() +
+      geom_ribbon(
+        data = median_trans,
+        aes(rel_step, ymin = lower, ymax = upper, fill = transition),
+        alpha = 0.2, colour = NA
+      ) +
+      geom_line(
+        data = median_trans,
+        aes(rel_step, median_count, color = transition, group = transition),
+        size = 1
+      ) +
+      labs(
+        title = paste0("k1=",k1_val,", k2=",k2_val,", σ=",sigma_val,", p=",p_val),
+        x     = paste0("Percolation steps until the proportion of inactive nodes drops below ",threshold),
+        y     = "Transition count",
+        fill  = "Transition",
+        color = "Transition"
+      ) +
+      theme_bw() +
+      sx +
+      coord_cartesian(ylim = c(0, n_total))
+
+    return(p)
+  }
+}
+
+```
+
+```{r}
+p <- plot_single_trajectory(
+  df,
+  k1_val      = 5,
+  k2_val      = 6,
+  sigma_val   = 0.8,
+  p_val       = 0.39,
+  threshold   = 0.1,
+  metric      = "t",
+  log_scale   = TRUE,
+  log_base    = 10,
+  log_sigma   = 0.5
+)
+
+print(p)
+```
+
+
+```{r}
+ggsave(
+  "r3t.pdf",
+  plot      = p,
+  width     = 10,
+  height    = 6,
+  units     = "in",
+  dpi       = 320
+)
+```
