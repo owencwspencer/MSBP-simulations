@@ -3,21 +3,12 @@ import numpy as np
 import csv
 import json
 import multiprocessing
-import random
 
 n = 1000
 initial_activated_count = 10
-p_values = np.arange(0.005, 0.3, 0.005)
 k1_values = [2, 3, 4]
 sigma_values = np.arange(0.4, 0.9, 0.1)
-
-def increase_degree(G, delta, rng):
-    stubs = [node for node in G.nodes() for _ in range(delta)]
-    rng.shuffle(stubs)
-    for i in range(0, len(stubs) - 1, 2):
-        u, v = stubs[i], stubs[i+1]
-        if u != v and not G.has_edge(u, v):
-            G.add_edge(u, v)
+m_values = [2, 3, 4, 5, 6, 8, 10, 12]
 
 def spread_activation(_G, node_states, k1, k2, sigma):
     nodes_k2 = set()
@@ -73,10 +64,10 @@ def run_simulation(k1, k2, sigma):
     return n_steps, i_w_list, i_s_list, w_s_list, n_inactive_list, n_weak_list, n_strong_list
 
 def worker_task(params):
-    exp, p, k1, k2, sigma = params
+    exp, m_ba, k1, k2, sigma = params
     n_steps, i_w, i_s, w_s, ni, nw, ns = run_simulation(k1, k2, sigma)
     return [
-        k1, k2, sigma, p, exp, n_steps,
+        k1, k2, sigma, m_ba, exp, n_steps,
         json.dumps(i_w), json.dumps(i_s), json.dumps(w_s),
         json.dumps(ni), json.dumps(nw), json.dumps(ns)
     ]
@@ -84,19 +75,15 @@ def worker_task(params):
 if __name__ == '__main__':
     multiprocessing.freeze_support()
     num_experiments = 30
-    csv_filename = 'regimes_results.csv'
+    csv_filename = 'regimes_results_ba.csv'
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
-            'k1','k2','sigma','p','experiment','n_steps',
+            'k1','k2','sigma','m_ba','experiment','n_steps',
             'i_w','i_s','w_s','n_inactive','n_weak','n_strong'
         ])
         for exp in range(1, num_experiments+1):
-            graph_seed = exp
-            degree0 = int(round(p_values[0] * (n - 1)))
-            G = nx.random_regular_graph(degree0, n, seed=graph_seed)
-            prev_degree = degree0
-            nodes = list(G.nodes())
+            nodes = list(range(n))
             initials = []
             for init_idx in range(num_experiments):
                 seed_init = exp * num_experiments + init_idx
@@ -104,13 +91,10 @@ if __name__ == '__main__':
                 initials.append(
                     rng_init.choice(nodes, initial_activated_count, replace=False)
                 )
-            for p_idx, p in enumerate(p_values, start=1):
-                print(f"Exp {exp}: p {p_idx}/{len(p_values)}")
-                degree = int(round(p * (n - 1)))
-                if p_idx > 1:
-                    rng_py = random.Random(graph_seed + p_idx)
-                    increase_degree(G, degree - prev_degree, rng_py)
-                    prev_degree = degree
+            for m_idx, m_ba in enumerate(m_values, start=1):
+                print(f"Exp {exp}: m={m_ba} {m_idx}/{len(m_values)}")
+                graph_seed = exp * 10000 + m_idx
+                G = nx.barabasi_albert_graph(n, m_ba, seed=graph_seed)
                 adjacency = {u: list(G.adj[u]) for u in G.nodes()}
                 for initial in initials:
                     with multiprocessing.Pool(
@@ -118,7 +102,7 @@ if __name__ == '__main__':
                         initargs=(adjacency, initial)
                     ) as pool:
                         tasks = [
-                            (exp, p, k1, k2, sigma)
+                            (exp, m_ba, k1, k2, float(sigma))
                             for k1 in k1_values
                             for k2 in (k1+1, k1+2, k1+3)
                             for sigma in sigma_values
