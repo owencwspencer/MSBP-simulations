@@ -1,7 +1,7 @@
 ---
 title: "inputs"
 output: html_document
-date: "2025-07-02"
+date: "2025-08-12"
 ---
 
 ```{r setup, include=FALSE}
@@ -10,29 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 library(tidyverse)
-library(viridis)
-```
-
-```{r}
-colormap <- "viridis"
-
-limits = c(0, 1)
-
-scale_colour_discrete <- function(...) {
-  scale_colour_viridis_d(option = colormap, begin = limits[1], end = limits[2])
-}
-scale_color_discrete  <- scale_colour_discrete
-scale_fill_discrete   <- function(...) {
-  scale_fill_viridis_d(option = colormap, begin = limits[1], end = limits[2])
-}
-
-scale_colour_continuous <- function(...) {
-  scale_colour_viridis_c(option = colormap, begin = limits[1], end = limits[2])
-}
-scale_color_continuous  <- scale_colour_continuous
-scale_fill_continuous   <- function(...) {
-  scale_fill_viridis_c(option = colormap, begin = limits[1], end = limits[2])
-}
+library(purrr)
 ```
 
 ```{r}
@@ -40,175 +18,889 @@ df <- readRDS("inputs_results.rds")
 ```
 
 ```{r}
-simulation_data <- df
+k1_val          <- 2
+k2_val          <- 4
+p_val           <- 0.11
+sigma_val       <- 0.7
+```
 
-timeseries_data <- simulation_data %>%
-  mutate(across(
-    .cols = c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong),
-    .fns = ~map(.x, function(cell) {
-      if (length(cell) == 0) {
-        return(integer(0))
+```{r}
+n_total <- 10000
+n_weak_lower <- n_total * 0.2
+n_weak_upper <- n_total * 0.35
+```
+
+```{r}
+df_aug <- df %>%
+  mutate(
+    row_id       = row_number(),
+    tot_weak     = map_dbl(i_w, ~ if (length(.x)) sum(.x) else 0),
+    final_strong = map_dbl(n_strong, ~ if (length(.x)) .x[length(.x)] else 0),
+    cond_a       = final_strong < n_total,
+    cond_b       = tot_weak > n_weak_upper,
+    cond_c       = tot_weak < n_weak_lower
+  )
+```
+
+```{r}
+r0_tmp <- df_aug %>% filter(cond_a)
+rem1   <- df_aug %>% filter(!cond_a)
+```
+
+```{r}
+r3_tmp <- rem1 %>% filter(cond_c)
+rem2   <- rem1 %>% filter(!cond_c)
+```
+
+```{r}
+r1_tmp <- rem2 %>% filter(cond_b)
+r2_tmp <- rem2 %>% filter(!cond_b)
+```
+
+```{r}
+drop_aux <- c("row_id","tot_weak","final_strong","cond_a","cond_b","cond_c")
+
+r0 <- r0_tmp %>% select(-all_of(drop_aux))
+r1 <- r1_tmp %>% select(-all_of(drop_aux))
+r2 <- r2_tmp %>% select(-all_of(drop_aux))
+r3 <- r3_tmp %>% select(-all_of(drop_aux))
+```
+
+```{r}
+mk_long_weak <- function(d) {
+  d %>%
+    transmute(run_id,
+              l = map2(weak_by_weak, weak_by_strong, ~{
+                n <- length(.x)
+                if (n == 0) {
+                  tibble(step = integer(),
+                         tau  = double(),
+                         w_by_w = double(),
+                         w_by_s = double())
+                } else {
+                  ww <- c(0, as.numeric(.x))
+                  ws <- c(0, as.numeric(.y))
+                  n2 <- length(ww)
+                  tibble(step = seq_len(n2) - 1,
+                         tau  = seq(0, 1, length.out = n2),
+                         w_by_w = ww,
+                         w_by_s = ws)
+                }
+              })) %>%
+    unnest(l) %>%
+    mutate(ratio = if_else(w_by_w + w_by_s > 0, w_by_s / (w_by_w + w_by_s), 0)) %>%
+    select(run_id, tau, ratio)
+}
+
+mk_long_strong <- function(d) {
+  d %>%
+    transmute(run_id,
+              l = map2(strong_by_weak, strong_by_strong, ~{
+                n <- length(.x)
+                if (n == 0) {
+                  tibble(step = integer(),
+                         tau  = double(),
+                         s_by_w = double(),
+                         s_by_s = double())
+                } else {
+                  sw <- c(0, as.numeric(.x))
+                  ss <- c(0, as.numeric(.y))
+                  n2 <- length(sw)
+                  tibble(step = seq_len(n2) - 1,
+                         tau  = seq(0, 1, length.out = n2),
+                         s_by_w = sw,
+                         s_by_s = ss)
+                }
+              })) %>%
+    unnest(l) %>%
+    mutate(ratio = if_else(s_by_w + s_by_s > 0, s_by_s / (s_by_w + s_by_s), 0)) %>%
+    select(run_id, tau, ratio)
+}
+```
+
+```{r}
+select_group <- function(d, k1_val, k2_val, p_val, sigma_val) {
+  d %>%
+    filter(k1 == k1_val, k2 == k2_val, dplyr::near(p, p_val), dplyr::near(sigma, sigma_val)) %>%
+    mutate(run_id = row_number())
+}
+
+mk_long_weak <- function(d) {
+  d %>%
+    transmute(run_id,
+              l = map2(weak_by_weak, weak_by_strong, ~ tibble(step = seq_along(.x),
+                                                               w_by_w = as.numeric(.x),
+                                                               w_by_s = as.numeric(.y)))) %>%
+    unnest(l) %>%
+    mutate(ratio = if_else(w_by_w + w_by_s > 0, w_by_s/(w_by_w + w_by_s), NA_real_)) %>%
+    select(run_id, step, ratio)
+}
+
+mk_long_strong <- function(d) {
+  d %>%
+    transmute(run_id,
+              l = map2(strong_by_weak, strong_by_strong, ~ tibble(step = seq_along(.x),
+                                                                   s_by_w = as.numeric(.x),
+                                                                   s_by_s = as.numeric(.y)))) %>%
+    unnest(l) %>%
+    mutate(ratio = if_else(s_by_w + s_by_s > 0, s_by_s/(s_by_w + s_by_s), NA_real_)) %>%
+    select(run_id, step, ratio)
+}
+```
+
+```{r}
+r1_g <- select_group(r1, k1_val, k2_val, p_val, sigma_val)
+r2_g <- select_group(r2, k1_val, k2_val, p_val, sigma_val)
+r3_g <- select_group(r3, k1_val, k2_val, p_val, sigma_val)
+
+W1 <- if (nrow(r1_g)) mk_long_weak(r1_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+W2 <- if (nrow(r2_g)) mk_long_weak(r2_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+W3 <- if (nrow(r3_g)) mk_long_weak(r3_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+
+S1 <- if (nrow(r1_g)) mk_long_strong(r1_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+S2 <- if (nrow(r2_g)) mk_long_strong(r2_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+S3 <- if (nrow(r3_g)) mk_long_strong(r3_g) else tibble(run_id=integer(), tau=double(), ratio=double())
+```
+
+```{r}
+xlims <- c(0, 1)
+ylims <- c(0, 1)
+title_suffix <- paste0("k1=", k1_val, ", k2=", k2_val, ",p=", signif(p_val, 6), ", sigma=", signif(sigma_val, 6))
+```
+
+```{r}
+g_w_r1 <- ggplot(W1, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r1: weak ratio  ", title_suffix), x = "normalized step (τ)", y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+g_w_r2 <- ggplot(W2, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r2: weak ratio  ", title_suffix), x = "normalized step (τ)", y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+g_w_r3 <- ggplot(W3, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r3: weak ratio  ", title_suffix), x = "normalized step (τ)", y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+```
+
+```{r}
+g_s_r1 <- ggplot(S1, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r1: strong ratio  ", title_suffix), x = "normalized step (τ)", y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+g_s_r2 <- ggplot(S2, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r2: strong ratio  ", title_suffix), x = "normalized step (τ)", y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+g_s_r3 <- ggplot(S3, aes(tau, ratio, group = run_id)) +
+  geom_line(alpha = 0.35) +
+  scale_x_continuous(limits = xlims) +
+  scale_y_continuous(limits = ylims) +
+  labs(title = paste("r3: strong ratio  ", title_suffix), x = "normalized step (τ)", y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+```
+
+```{r}
+combined <- dplyr::bind_rows(
+  dplyr::mutate(r1, regime = "r1"),
+  dplyr::mutate(r2, regime = "r2"),
+  dplyr::mutate(r3, regime = "r3")
+) %>%
+  dplyr::filter(k1 == k1_val, k2 == k2_val, dplyr::near(p, p_val)) %>%
+  dplyr::group_by(regime, sigma) %>%
+  dplyr::mutate(run_id = dplyr::row_number()) %>%
+  dplyr::ungroup()
+```
+
+```{r}
+weak_long <- combined %>%
+  dplyr::transmute(regime, sigma, run_id,
+                   l = purrr::map2(weak_by_weak, weak_by_strong, ~{
+                     n <- length(.x)
+                     if (n == 0) {
+                       tibble::tibble(tau = double(),
+                                      w_by_w = double(),
+                                      w_by_s = double())
+                     } else {
+                       ww <- c(0, as.numeric(.x))
+                       ws <- c(0, as.numeric(.y))
+                       n2 <- length(ww)
+                       tibble::tibble(
+                         tau   = seq(0, 1, length.out = n2),
+                         w_by_w = ww,
+                         w_by_s = ws
+                       )
+                     }
+                   })) %>%
+  tidyr::unnest(l) %>%
+  dplyr::mutate(ratio = dplyr::if_else(w_by_w + w_by_s > 0, w_by_s / (w_by_w + w_by_s), 0)) %>%
+  dplyr::select(regime, sigma, run_id, tau, ratio)
+
+strong_long <- combined %>%
+  dplyr::transmute(regime, sigma, run_id,
+                   l = purrr::map2(strong_by_weak, strong_by_strong, ~{
+                     n <- length(.x)
+                     if (n == 0) {
+                       tibble::tibble(tau = double(),
+                                      s_by_w = double(),
+                                      s_by_s = double())
+                     } else {
+                       sw <- c(0, as.numeric(.x))
+                       ss <- c(0, as.numeric(.y))
+                       n2 <- length(sw)
+                       tibble::tibble(
+                         tau   = seq(0, 1, length.out = n2),
+                         s_by_w = sw,
+                         s_by_s = ss
+                       )
+                     }
+                   })) %>%
+  tidyr::unnest(l) %>%
+  dplyr::mutate(ratio = dplyr::if_else(s_by_w + s_by_s > 0, s_by_s / (s_by_w + s_by_s), 0)) %>%
+  dplyr::select(regime, sigma, run_id, tau, ratio)
+```
+
+```{r}
+title_suffix <- paste0("k1=", k1_val, "  k2=", k2_val, "  p=", signif(p_val, 6))
+
+g_weak_all <- ggplot2::ggplot(weak_long, ggplot2::aes(tau, ratio, group = interaction(regime, run_id), color = sigma)) +
+  ggplot2::geom_line(alpha = 0.35) +
+  ggplot2::scale_x_continuous(limits = c(0, 1)) +
+  ggplot2::scale_y_continuous(limits = c(0, 1)) +
+  ggplot2::scale_color_viridis_c(name = expression(sigma)) +
+  ggplot2::labs(title = paste("Weak ratio: r1 + r2 + r3   ", title_suffix),
+                x = "normalized step (τ)",
+                y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  ggplot2::theme_minimal()
+
+g_strong_all <- ggplot2::ggplot(strong_long, ggplot2::aes(tau, ratio, group = interaction(regime, run_id), color = sigma)) +
+  ggplot2::geom_line(alpha = 0.35) +
+  ggplot2::scale_x_continuous(limits = c(0, 1)) +
+  ggplot2::scale_y_continuous(limits = c(0, 1)) +
+  ggplot2::scale_color_viridis_c(name = expression(sigma)) +
+  ggplot2::labs(title = paste("Strong ratio: r1 + r2 + r3   ", title_suffix),
+                x = "normalized step (τ)",
+                y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  ggplot2::theme_minimal()
+```
+
+```{r}
+print(g_weak_all)
+print(g_strong_all)
+```
+
+```{r}
+# Summarize weak
+weak_summary_norm <- weak_long %>%
+  group_by(regime, sigma, tau) %>%
+  summarise(med = median(ratio, na.rm=TRUE),
+            sd  = sd(ratio, na.rm=TRUE),
+            .groups="drop")
+
+# Summarize strong
+strong_summary_norm <- strong_long %>%
+  group_by(regime, sigma, tau) %>%
+  summarise(med = median(ratio, na.rm=TRUE),
+            sd  = sd(ratio, na.rm=TRUE),
+            .groups="drop")
+
+# Weak plot
+g_weak_all_summary <- ggplot() +
+  geom_ribbon(data = weak_summary_norm,
+              aes(x = tau,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = sigma,
+                  group = sigma),
+              alpha = 0.25) +
+  geom_line(data = weak_summary_norm,
+            aes(x = tau, y = med, color = sigma, group = sigma),
+            size = 1) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  scale_fill_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (median ±1 sd): r1 + r2 + r3   ", title_suffix),
+       x = "normalized step (τ)",
+       y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+# Strong plot
+g_strong_all_summary <- ggplot() +
+  geom_ribbon(data = strong_summary_norm,
+              aes(x = tau,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = sigma,
+                  group = sigma),
+              alpha = 0.25) +
+  geom_line(data = strong_summary_norm,
+            aes(x = tau, y = med, color = sigma, group = sigma),
+            size = 1) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  scale_fill_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (median ±1 sd): r1 + r2 + r3   ", title_suffix),
+       x = "normalized step (τ)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+# Display
+print(g_weak_all_summary)
+print(g_strong_all_summary)
+```
+
+
+```{r}
+# Find the maximum step length across all weak/strong runs
+max_step_weak <- combined %>%
+  mutate(len = map_int(weak_by_weak, length)) %>%
+  summarise(max_len = max(len, na.rm = TRUE)) %>%
+  pull(max_len)
+
+max_step_strong <- combined %>%
+  mutate(len = map_int(strong_by_weak, length)) %>%
+  summarise(max_len = max(len, na.rm = TRUE)) %>%
+  pull(max_len)
+
+# Pad weak runs
+weak_long_padded <- combined %>%
+  transmute(regime, sigma, run_id,
+            l = map2(weak_by_weak, weak_by_strong, ~{
+              n <- length(.x)
+              ww <- as.numeric(.x)
+              ws <- as.numeric(.y)
+              tib <- tibble(step = seq_len(n),
+                            w_by_w = ww,
+                            w_by_s = ws)
+              tib <- tib %>%
+                mutate(ratio = if_else(w_by_w + w_by_s > 0, w_by_s / (w_by_w + w_by_s), 0))
+              if (n < max_step_weak) {
+                tib <- bind_rows(
+                  tib,
+                  tibble(step = (n+1):max_step_weak,
+                         w_by_w = NA_real_, w_by_s = NA_real_, ratio = 1)
+                )
+              }
+              tib
+            })) %>%
+  unnest(l) %>%
+  select(regime, sigma, run_id, step, ratio)
+
+# Pad strong runs
+strong_long_padded <- combined %>%
+  transmute(regime, sigma, run_id,
+            l = map2(strong_by_weak, strong_by_strong, ~{
+              n <- length(.x)
+              sw <- as.numeric(.x)
+              ss <- as.numeric(.y)
+              tib <- tibble(step = seq_len(n),
+                            s_by_w = sw,
+                            s_by_s = ss)
+              tib <- tib %>%
+                mutate(ratio = if_else(s_by_w + s_by_s > 0, s_by_s / (s_by_w + s_by_s), 0))
+              if (n < max_step_strong) {
+                tib <- bind_rows(
+                  tib,
+                  tibble(step = (n+1):max_step_strong,
+                         s_by_w = NA_real_, s_by_s = NA_real_, ratio = 1)
+                )
+              }
+              tib
+            })) %>%
+  unnest(l) %>%
+  select(regime, sigma, run_id, step, ratio)
+
+# Plots
+g_weak_all_padded <- ggplot(weak_long_padded, aes(step, ratio, group = interaction(regime, run_id), color = sigma)) +
+  geom_line(alpha = 0.35) +
+  scale_y_continuous(limits = c(0,1)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (padded): r1 + r2 + r3   ", title_suffix),
+       x = "step", y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+g_strong_all_padded <- ggplot(strong_long_padded, aes(step, ratio, group = interaction(regime, run_id), color = sigma)) +
+  geom_line(alpha = 0.35) +
+  scale_y_continuous(limits = c(0,1)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (padded): r1 + r2 + r3   ", title_suffix),
+       x = "step", y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+print(g_weak_all_padded)
+print(g_strong_all_padded)
+```
+
+```{r}
+# Summarize the padded data by step for the median/ribbon plots
+weak_summary <- weak_long_padded %>%
+  group_by(sigma, step) %>%
+  summarise(
+    med = median(ratio, na.rm = TRUE),
+    sd  = sd(ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+strong_summary <- strong_long_padded %>%
+  group_by(sigma, step) %>%
+  summarise(
+    med = median(ratio, na.rm = TRUE),
+    sd  = sd(ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Weak plot with median ± sd
+g_weak_all_padded <- ggplot() +
+  # all runs faint
+  geom_line(data = weak_long_padded,
+            aes(step, ratio, group = interaction(regime, run_id), color = sigma),
+            alpha = 0.15) +
+  # ribbon grouped by sigma
+  geom_ribbon(data = weak_summary,
+              aes(step,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  group = sigma,
+                  fill = factor(sigma)),
+              alpha = 0.2) +
+  # median line
+  geom_line(data = weak_summary,
+            aes(step, med, color = sigma, group = sigma),
+            linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (padded, median ±1 sd): r1 + r2 + r3  ", title_suffix),
+       x = "step",
+       y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+# Strong plot with median ± sd
+g_strong_all_padded <- ggplot() +
+  geom_line(data = strong_long_padded,
+            aes(step, ratio, group = interaction(regime, run_id), color = sigma),
+            alpha = 0.15) +
+  geom_ribbon(data = strong_summary,
+              aes(step,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  group = sigma,
+                  fill = factor(sigma)),
+              alpha = 0.2) +
+  geom_line(data = strong_summary,
+            aes(step, med, color = sigma, group = sigma),
+            linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (padded, median ±1 sd): r1 + r2 + r3  ", title_suffix),
+       x = "step",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+print(g_weak_all_padded)
+print(g_strong_all_padded)
+```
+
+```{r}
+# Variable threshold for alignment
+threshold <- 0.9
+
+align_runs <- function(df, threshold) {
+  df %>%
+    group_by(regime, sigma, run_id) %>%
+    group_modify(~{
+      d <- .x
+      # find first step where ratio >= threshold
+      hit <- which(d$ratio >= threshold)[1]
+      if (is.na(hit)) {
+        align_offset <- 0
       } else {
-        return(unlist(cell))
+        align_offset <- d$step[hit]
       }
-    })
-  )) %>%
-  mutate(run_id = row_number()) %>%
-  select(
-    run_id, p, k1, k2, sigma,
-    weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong
-  ) %>%
-  unnest(c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong)) %>%
-  group_by(run_id) %>%
-  mutate(time_step = row_number()) %>%
-  ungroup()
-```
+      d %>% mutate(align_step = step - align_offset)
+    }) %>%
+    ungroup()
+}
 
-```{r}
-ratio_data <- timeseries_data %>%
-  mutate(equation = k2 - k1 / sigma) %>%
-  pivot_longer(
-    cols = c(weak_by_weak, weak_by_strong, strong_by_weak, strong_by_strong),
-    names_to = "measure",
-    values_to = "value"
-  ) %>%
-  extract(
-    measure,
-    into = c("transition_to", "neighbor_type"),
-    regex = "^(.*)_by_(.*)$",
-    remove = FALSE
-  ) %>%
-  pivot_wider(
-    names_from = neighbor_type,
-    values_from = value,
-    values_fill = 0
-  ) %>%
-  mutate(
-    ratio = if_else(strong + weak == 0, 0, strong / (strong + weak))
-  ) %>%
-  mutate(
-    transition_to = factor(
-      transition_to,
-      levels = c("weak", "strong"),
-      labels = c("Nodes Becoming Weak", "Nodes Becoming Strong")
-    ),
-    equation_label = paste("Eq =", round(equation, 2))
+# Align weak and strong runs using the correct data frames
+weak_aligned <- align_runs(weak_long_padded, threshold)
+strong_aligned <- align_runs(strong_long_padded, threshold)
+
+# Find global min/max across all runs
+min_shift <- min(c(weak_aligned$align_step, strong_aligned$align_step), na.rm=TRUE)
+max_shift <- max(c(weak_aligned$align_step, strong_aligned$align_step), na.rm=TRUE)
+
+# Pad each run to cover full range with 0 at start and 1 at end
+pad_aligned <- function(df, min_shift, max_shift) {
+  df %>%
+    group_by(regime, sigma, run_id) %>%
+    group_modify(~{
+      d <- .x
+      # full range
+      full_steps <- seq(min_shift, max_shift)
+      d2 <- tibble(align_step = full_steps) %>%
+        left_join(d, by="align_step")
+      # fill start and end padding
+      d2$ratio[is.na(d2$ratio) & d2$align_step < min(d$align_step)] <- 0
+      d2$ratio[is.na(d2$ratio) & d2$align_step > max(d$align_step)] <- 1
+      d2$regime <- unique(d$regime)
+      d2$sigma <- unique(d$sigma)
+      d2$run_id <- unique(d$run_id)
+      d2
+    }) %>%
+    ungroup()
+}
+
+weak_aligned_pad <- pad_aligned(weak_aligned, min_shift, max_shift)
+strong_aligned_pad <- pad_aligned(strong_aligned, min_shift, max_shift)
+
+# ADDED: Create the summary data frames needed for the plots below
+weak_aligned_summary <- weak_aligned_pad %>%
+  group_by(sigma, align_step) %>%
+  summarise(
+    med = median(ratio, na.rm = TRUE),
+    sd = sd(ratio, na.rm = TRUE),
+    .groups = "drop"
   )
-```
 
-```{r}
-plot_lines <- ratio_data %>%
-  group_by(equation_label, transition_to, time_step) %>%
-  summarise(mean_ratio = mean(ratio, na.rm = TRUE), .groups = 'drop')
-```
-
-```{r, fig.height = 20, fig.width = 10}
-temporal_plot <- ggplot(
-  plot_lines,
-  aes(x = time_step, y = mean_ratio)
-) +
-  geom_line(size = 1, alpha = 0.6) +
-  facet_grid(equation_label ~ transition_to, scales = "free_y") +
-  coord_cartesian(ylim = c(0, 1)) +
-  theme_bw()
-
-print(temporal_plot)
-```
-
-```{r}
-static_ratio_data <- simulation_data %>%
-  mutate(
-    total_weak_by_weak = map_dbl(weak_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_weak_by_strong = map_dbl(weak_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_strong_by_weak = map_dbl(strong_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_strong_by_strong = map_dbl(strong_by_strong, ~ sum(unlist(.x), na.rm = TRUE))
-  ) %>%
-  mutate(
-    equation = k2 - k1 / sigma,
-    ratio_weak = total_weak_by_strong / (total_weak_by_strong + total_weak_by_weak),
-    ratio_strong = total_strong_by_strong / (total_strong_by_strong + total_strong_by_weak)
-  ) %>%
-  select(p, equation, ratio_weak, ratio_strong) %>%
-  pivot_longer(
-    cols = c(ratio_weak, ratio_strong),
-    names_to = "transition_to",
-    values_to = "ratio"
-  ) %>%
-  mutate(
-    transition_to = factor(
-      transition_to,
-      levels = c("ratio_weak", "ratio_strong"),
-      labels = c("Nodes Becoming Weak", "Nodes Becoming Strong")
-    )
-  ) %>%
-  filter(!is.nan(ratio) & is.finite(ratio))
-```
-
-```{r}
-static_summary_lines <- static_ratio_data %>%
-  group_by(p, transition_to, equation) %>%
-  summarise(median_ratio = median(ratio, na.rm = TRUE), .groups = 'drop')
-```
-
-```{r, fig.height=40, fig.width=10}
-static_plot <- ggplot(
-  static_ratio_data,
-  aes(x = equation, y = ratio)
-) +
-  geom_point(alpha = 0.02, shape = 16, color = "gray50") +
-  geom_line(data = static_summary_lines, aes(y = median_ratio), size = 1, color = "#D55E00") +
-  facet_grid(p ~ transition_to, labeller = "label_both") +
-  theme_bw()
-
-print(static_plot)
-```
-
-```{r}
-individual_final_ratios <- simulation_data %>%
-  mutate(
-    total_weak_by_strong = map_dbl(weak_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_strong_by_strong = map_dbl(strong_by_strong, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_weak_by_weak = map_dbl(weak_by_weak, ~ sum(unlist(.x), na.rm = TRUE)),
-    total_strong_by_weak = map_dbl(strong_by_weak, ~ sum(unlist(.x), na.rm = TRUE))
-  ) %>%
-  mutate(
-    ratio_weak = if_else(
-      total_weak_by_strong + total_weak_by_weak == 0, 0,
-      total_weak_by_strong / (total_weak_by_strong + total_weak_by_weak)
-    ),
-    ratio_strong = if_else(
-      total_strong_by_strong + total_strong_by_weak == 0, 0,
-      total_strong_by_strong / (total_strong_by_strong + total_strong_by_weak)
-    ),
-    equation = k2 - sigma
-  ) %>%
-  select(p, equation, k2, ratio_weak, ratio_strong) %>%
-  filter(
-    !is.nan(ratio_weak) & is.finite(ratio_weak) &
-    !is.nan(ratio_strong) & is.finite(ratio_strong)
+strong_aligned_summary <- strong_aligned_pad %>%
+  group_by(sigma, align_step) %>%
+  summarise(
+    med = median(ratio, na.rm = TRUE),
+    sd = sd(ratio, na.rm = TRUE),
+    .groups = "drop"
   )
+
+
+# Plots
+g_weak_all_threshold <- ggplot() +
+  geom_line(data = weak_aligned_pad,
+            aes(align_step, ratio, group = interaction(regime, run_id), color = sigma),
+            alpha = 0.15) +
+  geom_ribbon(data = weak_aligned_summary,
+              aes(align_step, ymin = pmax(0, med - sd), ymax = pmin(1, med + sd),
+                  group = sigma, fill = factor(sigma)), alpha = 0.2) +
+  geom_line(data = weak_aligned_summary,
+            aes(align_step, med, color = sigma, group = sigma), linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (aligned at threshold =", threshold, ")", title_suffix),
+       x = "aligned step (0 = threshold crossing)",
+       y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+g_strong_all_threshold <- ggplot() +
+  geom_line(data = strong_aligned_pad,
+            aes(align_step, ratio, group = interaction(regime, run_id), color = sigma),
+            alpha = 0.15) +
+  geom_ribbon(data = strong_aligned_summary,
+              aes(align_step, ymin = pmax(0, med - sd), ymax = pmin(1, med + sd),
+                  group = sigma, fill = factor(sigma)), alpha = 0.2) +
+  geom_line(data = strong_aligned_summary,
+            aes(align_step, med, color = sigma, group = sigma), linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (aligned at threshold =", threshold, ")", title_suffix),
+       x = "aligned step (0 = threshold crossing)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+print(g_weak_all_threshold)
+print(g_strong_all_threshold)
 ```
 
 ```{r}
-p_value_to_plot <- 0.36
+# Condensed (median + 1 sd ribbon only) plots
 
-plot_weak_individual_filtered <- individual_final_ratios %>%
-  filter(p == p_value_to_plot) %>%
-  ggplot(aes(x = equation, y = k2, color = ratio_weak)) +
-  geom_jitter(alpha = 0.1, width = 0.1, height = 0.1) +
-  theme_bw()
+# Weak padded
+g_weak_all_padded_condensed <- ggplot(weak_summary,
+    aes(step, med, color = sigma, group = sigma)) +
+  geom_ribbon(aes(ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = factor(sigma)),
+              alpha = 0.2, color = NA) +
+  geom_line(size = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (padded, condensed median ±1 sd)", title_suffix),
+       x = "step", y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
 
-print(plot_weak_individual_filtered)
+# Strong padded
+g_strong_all_padded_condensed <- ggplot(strong_summary,
+    aes(step, med, color = sigma, group = sigma)) +
+  geom_ribbon(aes(ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = factor(sigma)),
+              alpha = 0.2, color = NA) +
+  geom_line(size = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (padded, condensed median ±1 sd)", title_suffix),
+       x = "step", y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+# Weak threshold-aligned
+g_weak_all_threshold_condensed <- ggplot(weak_aligned_summary,
+    aes(align_step, med, color = sigma, group = sigma)) +
+  geom_ribbon(aes(ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = factor(sigma)),
+              alpha = 0.2, color = NA) +
+  geom_line(size = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (threshold =", threshold, ", condensed median ±1 sd)", title_suffix),
+       x = "aligned step (0 = threshold crossing)",
+       y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+# Strong threshold-aligned
+g_strong_all_threshold_condensed <- ggplot(strong_aligned_summary,
+    aes(align_step, med, color = sigma, group = sigma)) +
+  geom_ribbon(aes(ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = factor(sigma)),
+              alpha = 0.2, color = NA) +
+  geom_line(size = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Strong ratio (threshold =", threshold, ", condensed median ±1 sd)", title_suffix),
+       x = "aligned step (0 = threshold crossing)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal() + scale_x_continuous(limits = c(-3, 2))
+
+print(g_weak_all_padded_condensed)
+print(g_strong_all_padded_condensed)
+print(g_weak_all_threshold_condensed)
+print(g_strong_all_threshold_condensed)
 ```
 
 ```{r}
-p_value_to_plot <- 0.1
+# Division-based normalization (step/max_step per run)
+normalize_division <- function(df, start_val = 0, end_val = 1, n_points = 200) {
+  df %>%
+    group_by(regime, sigma, run_id) %>%
+    mutate(max_step = max(step)) %>%
+    ungroup() %>%
+    group_by(regime, sigma, run_id) %>%
+    do({
+      run <- .
+      norm_step <- run$step / run$max_step
+      ratio <- run$ratio
+      # common grid across runs (0 → 1)
+      grid <- seq(0, 1, length.out = n_points)
+      interp <- approx(norm_step, ratio, xout = grid, rule = 2, ties = "ordered")$y
+      tibble(norm_step = grid,
+             ratio = interp)
+    }) %>%
+    ungroup() %>%
+    mutate(ratio = ifelse(norm_step == 0, start_val, ratio),
+           ratio = ifelse(norm_step == 1, end_val, ratio))
+}
 
-plot_strong_individual_filtered <- individual_final_ratios %>%
-  filter(p == p_value_to_plot) %>%
-  ggplot(aes(x = equation, y = k2, color = ratio_strong)) +
-  geom_jitter(alpha = 0.1, width = 0.1, height = 0.1) +
-  theme_bw()
+# Apply to weak and strong runs using the correct data frames
+weak_div <- normalize_division(weak_long_padded)
+strong_div <- normalize_division(strong_long_padded)
 
-print(plot_strong_individual_filtered)
+# Summaries for median ± sd per sigma
+weak_div_summary <- weak_div %>%
+  group_by(sigma, norm_step) %>%
+  summarise(med = median(ratio, na.rm = TRUE),
+            sd  = sd(ratio, na.rm = TRUE),
+            .groups = "drop")
+
+strong_div_summary <- strong_div %>%
+  group_by(sigma, norm_step) %>%
+  summarise(med = median(ratio, na.rm = TRUE),
+            sd  = sd(ratio, na.rm = TRUE),
+            .groups = "drop")
+
+# Weak division-normalized plot
+g_weak_all_division <- ggplot() +
+  geom_ribbon(data = weak_div_summary,
+              aes(norm_step,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  group = sigma,
+                  fill = factor(sigma)),
+              alpha = 0.2) +
+  geom_line(data = weak_div_summary,
+            aes(norm_step, med, color = sigma, group = sigma),
+            linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("Weak ratio (division normalized, median ±1 sd): r1 + r2 + r3  ", title_suffix),
+       x = "normalized step (step / max step)",
+       y = "weak_by_strong / (weak_by_weak + weak_by_strong)") +
+  theme_minimal()
+
+# Strong division-normalized plot
+g_strong_all_division <- ggplot() +
+  geom_ribbon(data = strong_div_summary,
+              aes(norm_step,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  group = sigma,
+                  fill = factor(sigma)),
+              alpha = 0.2) +
+  geom_line(data = strong_div_summary,
+            aes(norm_step, med, color = sigma, group = sigma),
+            linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  labs(title = paste("", title_suffix),
+       x = "normalized step (step / max step)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+print(g_weak_all_division)
+print(g_strong_all_division)
 ```
+
+```{r}
+# Summarize sigma values per regime
+sigma_summary <- combined %>%
+  group_by(regime, sigma) %>%
+  summarise(
+    n_runs = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(regime, sigma)
+
+# Show summary table
+sigma_summary
+```
+
+```{r}
+# Step 1: Determine majority regime per sigma
+sigma_regime_map <- combined %>%
+  group_by(sigma, regime) %>%
+  summarise(n_runs = n(), .groups = "drop") %>%
+  group_by(sigma) %>%
+  slice_max(n_runs, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(sigma, regime_majority = regime)
+
+# Step 2: Merge with summary data
+strong_div_summary_regime <- strong_div_summary %>%
+  left_join(sigma_regime_map, by = "sigma")
+
+# Step 3: Modified plot
+g_strong_all_division_regime <- ggplot() +
+  geom_ribbon(data = strong_div_summary_regime,
+              aes(norm_step,
+                  ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  group = sigma,
+                  fill = sigma),
+              alpha = 0.2) +
+  geom_line(data = strong_div_summary_regime,
+            aes(norm_step, med, color = sigma, group = sigma),
+            size = 1) +
+  # add points with shapes = regime majority
+  geom_point(data = strong_div_summary_regime,
+             aes(norm_step, med, color = sigma, shape = regime_majority),
+             size = 2) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_c(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  scale_shape_manual(name = "Majority Regime",
+                     values = c(r1 = 16, r2 = 17, r3 = 15)) + # circle, triangle, square
+  labs(title = paste("median ±1 sd", title_suffix),
+       x = "normalized step (step / max step)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal()
+
+print(g_strong_all_division_regime)
+
+```
+
+```{r}
+# Step 1: The `sigma_regime_map` mapping sigma values to their majority regime
+# has already been created in a previous chunk. We can reuse it.
+
+# Step 2: Merge the regime mapping with the threshold-aligned summary data.
+strong_aligned_summary_regime <- strong_aligned_summary %>%
+  left_join(sigma_regime_map, by = "sigma")
+
+# Step 3: Create the new plot, adding point shapes for the majority regime.
+g_strong_all_threshold_condensed_regime <- ggplot(strong_aligned_summary_regime,
+    aes(align_step, med, color = sigma, group = sigma)) +
+  geom_ribbon(aes(ymin = pmax(0, med - sd),
+                  ymax = pmin(1, med + sd),
+                  fill = factor(sigma)),
+              alpha = 0.2, color = NA) +
+  geom_line(size = 1, alpha = 0.4) +
+  geom_point(aes(shape = regime_majority), size = 2, alpha = 0.4) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_viridis_d(name = expression(sigma)) +
+  scale_color_viridis_c(name = expression(sigma)) +
+  scale_shape_manual(name = "Majority Regime",
+                     values = c(r1 = 16, r2 = 17, r3 = 15)) +
+  labs(title = paste("Strong ratio (threshold, condensed, regime markers)", title_suffix),
+       x = "aligned step (0 = threshold crossing)",
+       y = "strong_by_strong / (strong_by_weak + strong_by_strong)") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(-3, 2))
+
+print(g_strong_all_division_regime)
+```
+
+```{r}
+# Create a faceted version of the condensed threshold plot with regime markers
+g_strong_all_threshold_condensed_faceted <- ggplot(
+    data = strong_aligned_summary_regime,
+    mapping = aes(x = align_step, y = med)
+  ) +
+  geom_ribbon(
+    aes(ymin = pmax(0, med - sd), ymax = pmin(1, med + sd)),
+    fill = "grey50", alpha = 0.3
+  ) +
+  geom_line(color = "black", size = 1) +
+  geom_point(aes(shape = regime_majority), size = 2.5) +
+  facet_wrap(~ sigma) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(-3, 2)) +
+  scale_shape_manual(
+    name = "Majority Regime",
+    values = c("r1" = 16, "r2" = 17, "r3" = 15)
+  ) +
+  labs(
+    title = paste("Strong Ratio by Sigma (Threshold Aligned)", title_suffix),
+    subtitle = "Median ±1 sd, with markers indicating the majority regime for each sigma",
+    x = "Aligned Step (0 = Threshold Crossing)",
+    y = "strong_by_strong / (strong_by_weak + strong_by_strong)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(g_strong_all_threshold_condensed_faceted)
+```
+
+

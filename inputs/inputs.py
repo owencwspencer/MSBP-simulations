@@ -8,9 +8,9 @@ import numba
 
 n = 1000
 initial_activated_count = 10
-p_values = np.arange(0.005, 0.3, 0.005)
-k1_values = [2, 3, 4]
-sigma_values = np.arange(0.4, 0.9, 0.1)
+p_values = np.arange(0.005, 0.4, 0.005)
+k1_values = [2, 3, 4, 5]
+sigma_values = np.arange(0.1, 0.9, 0.05)
 
 def increase_degree(G, delta, rng):
     stubs = [node for node in G.nodes() for _ in range(delta)]
@@ -113,6 +113,7 @@ def run_simulation(k1, k2, sigma, initial_nodes):
     
     i_w_list, i_s_list, w_s_list = [], [], []
     w_by_w_list, w_by_s_list, s_by_w_list, s_by_s_list = [], [], [], []
+    n_inactive_list, n_weak_list, n_strong_list = [], [], []
 
     while True:
         res = _spread_activation_numba(node_states, k1, k2, sigma, ADJ_DATA, ADJ_INDICES)
@@ -127,30 +128,43 @@ def run_simulation(k1, k2, sigma, initial_nodes):
         s_by_w_list.append(s_by_w)
         s_by_s_list.append(s_by_s)
 
+        n_strong = int(np.count_nonzero(node_states == 1.0))
+        n_inactive = int(np.count_nonzero(node_states == 0.0))
+        n_weak = n - n_inactive - n_strong
+
+        n_inactive_list.append(n_inactive)
+        n_weak_list.append(n_weak)
+        n_strong_list.append(n_strong)
+
     n_steps = len(i_w_list)
     return (n_steps, i_w_list, i_s_list, w_s_list,
-            w_by_w_list, w_by_s_list, s_by_w_list, s_by_s_list)
+            w_by_w_list, w_by_s_list, s_by_w_list, s_by_s_list,
+            n_inactive_list, n_weak_list, n_strong_list)
 
 def worker_task(params):
     exp, p, k1, k2, sigma, initial = params
     res = run_simulation(k1, k2, sigma, initial)
-    n_steps, i_w, i_s, w_s, w_by_w, w_by_s, s_by_w, s_by_s = res
+    (n_steps, i_w, i_s, w_s,
+     w_by_w, w_by_s, s_by_w, s_by_s,
+     n_inactive, n_weak, n_strong) = res
     return [
         k1, k2, sigma, p, exp, n_steps,
         json.dumps(i_w), json.dumps(i_s), json.dumps(w_s),
         json.dumps(w_by_w), json.dumps(w_by_s),
-        json.dumps(s_by_w), json.dumps(s_by_s)
+        json.dumps(s_by_w), json.dumps(s_by_s),
+        json.dumps(n_inactive), json.dumps(n_weak), json.dumps(n_strong)
     ]
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
     num_experiments = 30
-    csv_filename = 'regimes_results_optimized.csv'
+    csv_filename = 'inputs_results.csv'
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
             'k1','k2','sigma','p','experiment','n_steps', 'i_w','i_s','w_s',
-            'weak_by_weak', 'weak_by_strong', 'strong_by_weak', 'strong_by_strong'
+            'weak_by_weak', 'weak_by_strong', 'strong_by_weak', 'strong_by_strong',
+            'n_inactive','n_weak','n_strong'
         ])
         for exp in range(1, num_experiments+1):
             graph_seed = exp
@@ -192,4 +206,3 @@ if __name__ == '__main__':
                     writer.writerows(results)
                     f.flush()
     print(f"Processing complete. Results saved to {csv_filename}")
-    
